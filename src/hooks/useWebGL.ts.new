@@ -1,0 +1,122 @@
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { WebGLContextManager } from '../utils/webgl/context-manager';
+import { WebGLStateManager } from '../utils/webgl/state-manager';
+
+interface WebGLHookResult {
+    gl: WebGL2RenderingContext | null;
+    initialized: boolean;
+    error: Error | null;
+    contextLost: boolean;
+    supportsWebGL2: boolean;
+    memoryInfo: {
+        totalBufferSize: number;
+        textureSize: number;
+    } | null;
+}
+
+export function useWebGL(canvasRef: React.RefObject<HTMLCanvasElement>): WebGLHookResult {
+    const [initialized, setInitialized] = useState(false);
+    const [error, setError] = useState<Error | null>(null);
+    const [contextLost, setContextLost] = useState(false);
+    const [supportsWebGL2, setSupportsWebGL2] = useState(true);
+    const [memoryInfo, setMemoryInfo] = useState<WebGLHookResult['memoryInfo']>(null);
+
+    const glRef = useRef<WebGL2RenderingContext | null>(null);
+    const contextManagerRef = useRef<WebGLContextManager | null>(null);
+    const stateManagerRef = useRef<WebGLStateManager | null>(null);
+
+    const initializeWebGL = useCallback(async () => {
+        if (!canvasRef.current) return;
+
+        try {
+            const gl = canvasRef.current.getContext('webgl2');
+            if (!gl) {
+                setSupportsWebGL2(false);
+                throw new Error('WebGL 2 not supported');
+            }
+
+            glRef.current = gl;
+            contextManagerRef.current = new WebGLContextManager(gl);
+            stateManagerRef.current = new WebGLStateManager(gl);
+
+            // Check WebGL capabilities
+            const capabilities = await contextManagerRef.current.checkCapabilities();
+            
+            // Update memory info
+            setMemoryInfo({
+                totalBufferSize: capabilities.maxTextureSize * capabilities.maxTextureUnits * 4,
+                textureSize: capabilities.maxTextureSize
+            });
+
+            // Check required extensions
+            const requiredExtensions = ['EXT_color_buffer_float', 'OES_texture_float_linear'];
+            for (const ext of requiredExtensions) {
+                if (!gl.getExtension(ext)) {
+                    throw new Error(`Required WebGL extension not supported: ${ext}`);
+                }
+            }
+
+            setInitialized(true);
+            
+        } catch (err) {
+            console.error('WebGL initialization failed:', err);
+            setError(err as Error);
+            cleanup();
+        }
+    }, [canvasRef]);
+
+    const cleanup = useCallback(() => {
+        if (contextManagerRef.current) {
+            contextManagerRef.current.dispose();
+            contextManagerRef.current = null;
+        }
+        if (stateManagerRef.current) {
+            stateManagerRef.current.dispose();
+            stateManagerRef.current = null;
+        }
+        glRef.current = null;
+        setInitialized(false);
+        setContextLost(false);
+        setMemoryInfo(null);
+    }, []);
+
+    useEffect(() => {
+        if (!canvasRef.current) return;
+
+        const handleContextLost = (event: WebGLContextEvent) => {
+            event.preventDefault();
+            setContextLost(true);
+            setError(new Error('WebGL context lost'));
+            cleanup();
+        };
+
+        const handleContextRestored = () => {
+            setContextLost(false);
+            setError(null);
+            initializeWebGL();
+        };
+
+        canvasRef.current.addEventListener('webglcontextlost', handleContextLost);
+        canvasRef.current.addEventListener('webglcontextrestored', handleContextRestored);
+
+        // Initial setup
+        initializeWebGL();
+
+        return () => {
+            if (canvasRef.current) {
+                canvasRef.current.removeEventListener('webglcontextlost', handleContextLost);
+                canvasRef.current.removeEventListener('webglcontextrestored', handleContextRestored);
+            }
+            cleanup();
+        };
+    }, [canvasRef, initializeWebGL, cleanup]);
+
+    return {
+        gl: glRef.current,
+        initialized,
+        error,
+        contextLost,
+        supportsWebGL2,
+        memoryInfo
+    };
+}

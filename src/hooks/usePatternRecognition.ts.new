@@ -1,0 +1,98 @@
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { PatternRecognizer } from '../../NeoSnipe/market_analysis/core/analyzers/pattern_recognition';
+import { PricePoint } from '../types/market-types';
+import { usePerformanceMonitor } from './usePerformanceMonitor';
+import { PatternAnalysisState, CacheEntry, PatternRecognitionHook } from '../types/pattern-recognition.types';
+
+const CACHE_EXPIRY_TIME = 5 * 60 * 1000; // 5 minutes
+
+export function usePatternRecognition(): PatternRecognitionHook {
+    const [state, setState] = useState<PatternAnalysisState>({
+        patterns: [],
+        loading: false,
+        error: null,
+        confidence: 0,
+        performance: {
+            gpuAccelerated: false,
+            executionTime: 0
+        }
+    });
+
+    const recognizer = useMemo(() => new PatternRecognizer(), []);
+    const patternCache = useRef<Map<string, CacheEntry>>(new Map());
+    const { startMonitoring, stopMonitoring, metrics } = usePerformanceMonitor();
+
+    // Cleanup expired cache entries
+    useEffect(() => {
+        const cleanup = setInterval(() => {
+            const now = Date.now();
+            patternCache.current.forEach((entry, key) => {
+                if (now - entry.timestamp > CACHE_EXPIRY_TIME) {
+                    patternCache.current.delete(key);
+                }
+            });
+        }, CACHE_EXPIRY_TIME);
+
+        return () => clearInterval(cleanup);
+    }, []);
+
+    const analyzePatterns = useCallback(async (priceData: PricePoint[]) => {
+        if (!priceData?.length) {
+            setState(prev => ({ ...prev, patterns: [], loading: false }));
+            return;
+        }
+
+        try {
+            setState(prev => ({ ...prev, loading: true, error: null }));
+            startMonitoring();
+
+            // Generate cache key from price data
+            const cacheKey = priceData.map(p => `${p.price}-${p.timestamp}`).join('|');
+            const cached = patternCache.current.get(cacheKey);
+
+            if (cached && Date.now() - cached.timestamp < CACHE_EXPIRY_TIME) {
+                setState(prev => ({
+                    ...prev,
+                    patterns: cached.patterns,
+                    loading: false
+                }));
+                return;
+            }
+
+            const result = await recognizer.analyzePattern(priceData);
+
+            // Cache the results
+            patternCache.current.set(cacheKey, {
+                patterns: result.patterns,
+                timestamp: Date.now()
+            });
+
+            setState({
+                patterns: result.patterns,
+                loading: false,
+                error: null,
+                confidence: result.confidence,
+                performance: {
+                    gpuAccelerated: result.gpuAccelerated,
+                    executionTime: result.executionTime
+                }
+            });
+
+        } catch (error) {
+            console.error('Pattern analysis failed:', error);
+            setState(prev => ({
+                ...prev,
+                loading: false,
+                error: error as Error
+            }));
+        } finally {
+            stopMonitoring();
+        }
+    }, [recognizer, startMonitoring, stopMonitoring]);
+
+    return {
+        ...state,
+        analyzePatterns,
+        metrics
+    };
+}
